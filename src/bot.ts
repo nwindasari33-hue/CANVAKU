@@ -1534,6 +1534,39 @@ bot.command("reset_email", async (ctx) => {
 
 // CALLBACK HANDLERS FOR ADMIN MENU
 
+bot.callbackQuery("check_slot_btn", async (ctx) => {
+    if (!isAdmin(ctx.from?.id || 0)) return;
+    try {
+        const totalSlotsRes = await sql("SELECT COALESCE(SUM(max_slots), 0) as max, COALESCE(SUM(member_count), 0) as used, COUNT(id) as nodes FROM canva_accounts WHERE is_active=1");
+        const row = totalSlotsRes.rows[0];
+
+        const currentCount = parseInt(row.used as any) || 0;
+        const maxSlot = parseInt(row.max as any) || 0;
+        const nodeCount = parseInt(row.nodes as any) || 0;
+        const available = maxSlot - currentCount;
+        const isFull = currentCount >= maxSlot;
+
+        let msg = `📊 <b>Status Server Canva (Cluster)</b>\n\n`;
+        msg += `👥 <b>Total Member:</b> ${currentCount} / ${maxSlot}\n`;
+        msg += `🟢 <b>Slot Tersedia:</b> ${available > 0 ? available : 0}\n`;
+        msg += `🏭 <b>Node Aktif:</b> ${nodeCount} Server\n\n`;
+
+        if (isFull) {
+            msg += `⛔ <b>STATUS: PENUH (ALL NODES)</b>\n`;
+            msg += `<i>Silakan cek lagi nanti. Admin sedang menambah server baru.</i>`;
+        } else {
+            msg += `✅ <b>STATUS: AMAN</b>\n`;
+            msg += `<i>Slot masih tersedia untuk aktivasi.</i>`;
+        }
+
+        await ctx.reply(msg, { parse_mode: "HTML" });
+        await ctx.answerCallbackQuery();
+    } catch (e: any) {
+        await ctx.reply(`❌ Gagal cek slot: ${e.message}`);
+        await ctx.answerCallbackQuery();
+    }
+});
+
 // View Account List Handler (Per User)
 bot.callbackQuery("view_account_list", async (ctx) => {
     // 1. Loading Animation
@@ -1882,7 +1915,7 @@ async function getNextSlotInfo(): Promise<string> {
 
 bot.hears("📊 Cek Slot", async (ctx) => {
     // 1. Ambil Data Slot Global (Multi-Account Aggregation)
-        const totalSlotsRes = await sql("SELECT COALESCE(SUM(max_slots), 0) as max, COALESCE(SUM(member_count), 0) as used FROM canva_accounts WHERE is_active=1");
+        const totalSlotsRes = await sql("SELECT COALESCE(SUM(max_slots), 0) as max, COALESCE(SUM(member_count), 0) as used, COUNT(id) as nodes FROM canva_accounts WHERE is_active=1");
         const row = totalSlotsRes.rows[0];
 
         const currentCount = parseInt(row.used as any) || 0;
@@ -2386,13 +2419,24 @@ bot.callbackQuery("test_invite", async (ctx) => {
     if (!isAdmin(ctx.from.id)) return;
     await ctx.reply("🤖 Menjalankan <b>Auto-Invite</b> Queue... (Wait)", { parse_mode: "HTML" });
 
-    // Serverless Mode: Cannot run exec. Insert fake "trigger" to queue logic if needed, or just tell user to wait for cron.
-    await ctx.reply(
-        "ℹ️ <b>Mode Serverless (Vercel):</b>\n" +
-        "Auto-Invite berjalan otomatis setiap jam via GitHub Actions.\n\n" +
-        "Tombol tes ini hanya berfungsi di Local Mode.",
-        { parse_mode: "HTML" }
-    );
+    if (process.env.VERCEL) {
+        await ctx.reply(
+            "ℹ️ <b>Mode Serverless (Vercel):</b>\n" +
+            "Auto-Invite berjalan otomatis setiap jam via GitHub Actions.\n\n" +
+            "Tombol tes ini hanya berfungsi di Local Mode.",
+            { parse_mode: "HTML" }
+        );
+    } else {
+        await ctx.reply("🚀 <b>Local Mode Detected:</b> Executing `npm run process-queue`...", { parse_mode: "HTML" });
+        exec("npm run process-queue", (error, stdout, stderr) => {
+            if (error) {
+                ctx.reply(`❌ <b>Error:</b>\n<pre>${error.message.substring(0, 200)}</pre>`, { parse_mode: "HTML" });
+                return;
+            }
+            const out = stdout.length > 500 ? stdout.substring(stdout.length - 500) : stdout;
+            ctx.reply(`✅ <b>Done:</b>\n<pre>${out}</pre>`, { parse_mode: "HTML" });
+        });
+    }
     await ctx.answerCallbackQuery();
 });
 
@@ -2567,32 +2611,30 @@ bot.callbackQuery("ask_new_email", async (ctx) => {
 });
 
 // Handler: Capture Email Input (Text Message)
-bot.on("message:text", async (ctx) => {
+bot.on("message:text", async (ctx, next) => {
     const text = ctx.message.text.trim();
     const userId = ctx.from.id;
 
-    // 1. Basic Email Regex Check
+    // 1. Skip if it is a command
+    if (text.startsWith("/")) return next();
+
+    // 2. Basic Email Regex Check
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(text)) {
-        // If not email, ignore (let other handlers process checks, but wait, bot.on is greedy?)
-        // Bot.on("message:text") catches EVERYTHING that hasn't been handled by specific commands yet if placed after them.
-        // Grammy middleware chain implies: if previous handlers (commands/hears) didn't match, this WILL catch it.
-        return;
-        // NOTE: If we simply return, it might just stop. 
-        // We only want to act if it LOOKS like an email AND user is in "Order Mode" (has selected_product_id).
+        return next();
     }
 
-    // 2. Check if User is in "Order Mode" (Has selected_product_id)
+    // 3. Check if User is in "Order Mode" (Has selected_product_id)
     try {
         const userRes = await sql("SELECT selected_product_id, email FROM users WHERE id = ?", [userId]);
-        if (userRes.rows.length === 0) return;
+        if (userRes.rows.length === 0) return next();
 
         const user = userRes.rows[0];
         const prodId = user.selected_product_id;
         const savedEmail = user.email;
 
         // If no product selected, ignore (User just typing random email?)
-        if (!prodId) return;
+        if (!prodId) return next();
 
         // 3. Process Logic based on Plan
         if (prodId === 1) {
