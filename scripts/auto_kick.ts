@@ -285,9 +285,9 @@ async function kickEnforcer() {
                         // Sync Database state for kicked targets
                         for (const email of scanResult.targets) {
                             const userRes = await sql(`SELECT id, username, first_name FROM users WHERE email = ?`, [email]);
-                            if (userRes.rows.length > 0) {
-                                const userId = userRes.rows[0].id as number;
-                                const username = userRes.rows[0].username ? `@${userRes.rows[0].username}` : (userRes.rows[0].first_name || 'No Name');
+                            for (const row of userRes.rows) {
+                                const userId = row.id as number;
+                                const username = row.username ? `@${row.username}` : (row.first_name || 'No Name');
                                 
                                 await sql(`UPDATE users SET status = 'expired', assigned_node_id = NULL WHERE id = ?`, [userId]);
                                 await sql(`UPDATE subscriptions SET status = 'expired' WHERE user_id = ? AND status = 'active'`, [userId]);
