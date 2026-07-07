@@ -392,21 +392,14 @@ async function runPuppeteerQueue() {
             }
 
             // ============================================================
-            // 2. PROCESS INVITES
+            // 2. PROCESS INVITES — Copy invite link ONCE, send to all users
             // ============================================================
-            for (const user of acc.invites_to_process) {
-                const email = user.email as string;
-                const userId = user.id as number;
-                const prodId = user.prod_id || 1;
-                const duration = user.duration_days || 30;
-                const planName = user.plan_name || 'Trial';
-                
-                const endDateObj = TimeUtils.addDaysWIB(duration);
-                const endDateStr = endDateObj.toISOString().replace('T', ' ').substring(0, 19);
+            if (acc.invites_to_process.length > 0) {
+                let inviteLink = "";
 
-                console.log(`   🚀 Inviting user: ${email}`);
+                // Step 1: Open modal and copy invite link ONCE
+                console.log(`   🔗 Getting invite link for ${acc.invites_to_process.length} users...`);
 
-                // Click "Review and invite"
                 let opened = false;
                 for (let retry = 0; retry < 3; retry++) {
                     await page.evaluate(() => {
@@ -423,136 +416,107 @@ async function runPuppeteerQueue() {
                         opened = true;
                         break;
                     } catch {
-                        console.log(`      ⚠️ Modal did not open, retrying click (attempt ${retry + 1}/3)...`);
+                        console.log(`      ⚠️ Modal did not open, retrying (attempt ${retry + 1}/3)...`);
                         await randomDelay(1000, 1500);
                     }
                 }
 
-                if (!opened) {
-                    console.log('      ❌ Review and invite modal could not be opened.');
-                    failInvites++;
-                    continue;
-                }
+                if (opened) {
+                    const debugDir = './debug_screenshots';
+                    if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
 
-                // STRATEGY: Use "Copy invite link" instead of email form
-                // Canva blocks email invites with security check (RRS error)
-                // But "Copy invite link" works without any captcha/security check
-                let inviteSuccess = false;
-                let inviteErr = "";
-                let inviteLink = "";
+                    try {
+                        // Grant clipboard permissions
+                        const context = browser.defaultBrowserContext();
+                        await context.overridePermissions('https://www.canva.com', ['clipboard-read', 'clipboard-write']);
 
-                const debugDir = './debug_screenshots';
-                if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
-                const ts = Date.now();
+                        // Click "Copy invite link" button
+                        const linkCopied = await page.evaluate(async () => {
+                            const buttons = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
+                            const copyBtn = buttons.find(btn => {
+                                const txt = (btn.textContent || '').toLowerCase();
+                                return txt.includes('copy invite link') || txt.includes('salin tautan') || txt.includes('salin link');
+                            }) as HTMLElement;
+                            if (copyBtn) { copyBtn.click(); return true; }
+                            return false;
+                        });
 
-                try {
-                    await page.screenshot({ path: `${debugDir}/invite_1_modal_${ts}.png`, fullPage: false });
+                        if (linkCopied) {
+                            await randomDelay(2000, 3000);
 
-                    // Grant clipboard permissions
-                    const context = browser.defaultBrowserContext();
-                    await context.overridePermissions('https://www.canva.com', ['clipboard-read', 'clipboard-write']);
+                            // Try clipboard
+                            try {
+                                inviteLink = await page.evaluate(async () => await navigator.clipboard.readText());
+                            } catch { /* fallback below */ }
 
-                    // Click "Copy invite link" button
-                    const linkCopied = await page.evaluate(async () => {
-                        const buttons = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
-                        const copyBtn = buttons.find(btn => {
-                            const txt = (btn.textContent || '').toLowerCase();
-                            return txt.includes('copy invite link') || txt.includes('salin tautan') || txt.includes('salin link');
-                        }) as HTMLElement;
-                        if (copyBtn) {
-                            copyBtn.click();
-                            return true;
-                        }
-                        return false;
-                    });
-
-                    if (!linkCopied) {
-                        inviteErr = "Copy invite link button not found";
-                    } else {
-                        await randomDelay(2000, 3000);
-
-                        // Try to read the link from clipboard
-                        try {
-                            inviteLink = await page.evaluate(async () => {
-                                return await navigator.clipboard.readText();
-                            });
-                        } catch {
-                            // Clipboard API may fail in headless — try reading from page
-                        }
-
-                        // Fallback: look for a visible link/input with canva invite URL
-                        if (!inviteLink || !inviteLink.includes('canva.com')) {
-                            const linkFromPage = await page.evaluate(() => {
-                                // Check if a toast/notification appeared with the link
-                                const inputs = Array.from(document.querySelectorAll('input[type="text"], input[readonly]'));
-                                for (const input of inputs) {
-                                    const val = (input as HTMLInputElement).value;
-                                    if (val.includes('canva.com') && (val.includes('invite') || val.includes('join'))) {
-                                        return val;
+                            // Fallback: scan DOM for invite URL
+                            if (!inviteLink || !inviteLink.includes('canva.com')) {
+                                const linkFromPage = await page.evaluate(() => {
+                                    const inputs = Array.from(document.querySelectorAll('input[type="text"], input[readonly]'));
+                                    for (const input of inputs) {
+                                        const val = (input as HTMLInputElement).value;
+                                        if (val.includes('canva.com') && (val.includes('invite') || val.includes('join'))) return val;
                                     }
-                                }
-                                // Check for any visible link text
-                                const allText = document.body.innerText;
-                                const match = allText.match(/(https:\/\/www\.canva\.com\/[^\s]+(?:invite|join)[^\s]*)/i);
-                                return match ? match[1] : '';
-                            });
-                            if (linkFromPage) inviteLink = linkFromPage;
+                                    const match = document.body.innerText.match(/(https:\/\/www\.canva\.com\/[^\s]+(?:invite|join)[^\s]*)/i);
+                                    return match ? match[1] : '';
+                                });
+                                if (linkFromPage) inviteLink = linkFromPage;
+                            }
+
+                            await page.screenshot({ path: `${debugDir}/invite_link_${Date.now()}.png`, fullPage: false });
                         }
+                    } catch (err: any) {
+                        console.error(`      ❌ Error getting invite link: ${err.message}`);
+                    }
 
-                        await page.screenshot({ path: `${debugDir}/invite_2_after_copy_${ts}.png`, fullPage: false });
+                    // Close modal
+                    await page.keyboard.press('Escape');
+                    await randomDelay(1000, 1500);
+                }
 
-                        if (inviteLink && inviteLink.includes('canva.com')) {
-                            console.log(`      🔗 Got invite link: ${inviteLink.substring(0, 60)}...`);
-                            inviteSuccess = true;
+                if (inviteLink && inviteLink.includes('canva.com')) {
+                    console.log(`   ✅ Got invite link: ${inviteLink.substring(0, 60)}...`);
+                    console.log(`   📨 Sending to ${acc.invites_to_process.length} users...`);
+
+                    // Step 2: Send the same link to ALL users in this batch
+                    for (const user of acc.invites_to_process) {
+                        const email = user.email as string;
+                        const userId = user.id as number;
+                        const prodId = user.prod_id || 1;
+                        const duration = user.duration_days || 30;
+                        const planName = user.plan_name || 'Trial';
+                        const endDateObj = TimeUtils.addDaysWIB(duration);
+                        const endDateStr = endDateObj.toISOString().replace('T', ' ').substring(0, 19);
+
+                        // Update DB
+                        await sql(`UPDATE users SET status = 'active', assigned_node_id = ?, selected_product_id = NULL WHERE id = ?`, [acc.id, userId]);
+                        const activeSub = await sql(`SELECT id FROM subscriptions WHERE user_id = ? AND status = 'active'`, [userId]);
+                        const startStr = TimeUtils.getWIBISOString();
+                        if (activeSub.rows.length > 0) {
+                            await sql(`UPDATE subscriptions SET end_date = ?, product_id = ?, start_date = ? WHERE id = ?`, [endDateStr, prodId, startStr, activeSub.rows[0].id]);
                         } else {
-                            inviteErr = `Could not extract invite link (got: "${inviteLink?.substring(0, 50) || 'empty'}")`;
+                            const subId = `sub_${Date.now()}_${userId}`;
+                            await sql(`INSERT INTO subscriptions (id, user_id, product_id, start_date, end_date, status) VALUES (?, ?, ?, ?, ?, 'active')`, [subId, userId, prodId, startStr, endDateStr]);
                         }
-                    }
-                } catch (err: any) {
-                    await page.screenshot({ path: `${debugDir}/invite_error_${ts}.png`, fullPage: false }).catch(() => {});
-                    inviteErr = err.message;
-                }
 
-                if (inviteSuccess) {
-                    console.log(`      ✅ Successfully got invite link for: ${email}`);
-                    successInvites++;
-
-                    // Update User Status
-                    await sql(`UPDATE users SET status = 'active', assigned_node_id = ?, selected_product_id = NULL WHERE id = ?`, [acc.id, userId]);
-
-                    // Add/update active subscription
-                    const activeSub = await sql(`SELECT id FROM subscriptions WHERE user_id = ? AND status = 'active'`, [userId]);
-                    const startStr = TimeUtils.getWIBISOString();
-
-                    if (activeSub.rows.length > 0) {
-                        await sql(`UPDATE subscriptions SET end_date = ?, product_id = ?, start_date = ? WHERE id = ?`, [endDateStr, prodId, startStr, activeSub.rows[0].id]);
-                    } else {
-                        const subId = `sub_${Date.now()}_${userId}`;
-                        await sql(`INSERT INTO subscriptions (id, user_id, product_id, start_date, end_date, status) VALUES (?, ?, ?, ?, ?, 'active')`, [subId, userId, prodId, startStr, endDateStr]);
-                    }
-
-                    // Send invite link to user via Telegram
-                    if (userId > 0) {
-                        const userText = `🎉 <b>UNDANGAN CANVA PRO BERHASIL!</b>\n\n🔗 Klik link berikut untuk bergabung:\n${inviteLink}\n\n📧 Email Anda: <code>${email}</code>\n📅 <b>Expired:</b> ${endDateStr}\n\n⚠️ <i>Link ini hanya berlaku 1x pakai. Harap segera klik.</i>`;
-                        const msgId = await sendTelegram(userId, userText);
-                        if (msgId) {
-                            await sql(`
-                                INSERT INTO message_queue (chat_id, message_id, delete_at) 
-                                VALUES (?, ?, datetime('now', '+7 hours', '+2 minutes'))
-                            `, [userId, msgId]);
+                        // Send invite link via Telegram
+                        if (userId > 0) {
+                            const userText = `🎉 <b>UNDANGAN CANVA PRO BERHASIL!</b>\n\n🔗 Klik link berikut untuk bergabung:\n${inviteLink}\n\n📧 Email Anda: <code>${email}</code>\n📅 <b>Expired:</b> ${endDateStr}\n\n⚠️ <i>Harap segera klik link di atas untuk bergabung.</i>`;
+                            const msgId = await sendTelegram(userId, userText);
+                            if (msgId) {
+                                await sql(`INSERT INTO message_queue (chat_id, message_id, delete_at) VALUES (?, ?, datetime('now', '+7 hours', '+2 minutes'))`, [userId, msgId]);
+                            }
                         }
-                    }
 
-                    await sendSystemLog(`📩 <b>User Invited (Link)</b>\n👤 ID: <code>${userId}</code>\n📧 Email: <code>${email}</code>\n📦 Paket: ${planName}\n🔗 <a href="${inviteLink}">Invite Link</a>`);
-                    acc.member_count++;
+                        console.log(`      ✅ Sent invite to: ${email} (ID: ${userId})`);
+                        await sendSystemLog(`📩 <b>User Invited (Link)</b>\n👤 ID: <code>${userId}</code>\n📧 Email: <code>${email}</code>\n📦 Paket: ${planName}`);
+                        successInvites++;
+                        acc.member_count++;
+                    }
                 } else {
-                    console.log(`      ❌ Invite failed: ${inviteErr}`);
-                    failInvites++;
+                    console.log(`   ❌ Could not get invite link. All ${acc.invites_to_process.length} invites failed.`);
+                    failInvites += acc.invites_to_process.length;
                 }
-
-                // Close modal
-                await page.keyboard.press('Escape');
-                await randomDelay(1500, 2500);
             }
 
             // Save Session Cookies
