@@ -42,6 +42,14 @@ jobs:
           LOG_CHANNEL_ID: ${{ secrets.LOG_CHANNEL_ID }}
         run: xvfb-run --auto-servernum npm run maintenance
       
+      - name: Upload debug screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots-${{ github.run_number }}
+          path: debug_screenshots/
+          if-no-files-found: ignore
+
       - name: Upload logs (if needed)
         if: failure()
         uses: actions/upload-artifact@v4

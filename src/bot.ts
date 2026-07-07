@@ -233,18 +233,34 @@ bot.command("channels", async (ctx) => {
     await ctx.reply(`📢 <b>List Channel Aktif:</b>\n\n${channels.join('\n')}`, { parse_mode: "HTML" });
 });
 
+async function safeSetMyCommands(commands: Parameters<typeof bot.api.setMyCommands>[0], scope: Parameters<typeof bot.api.setMyCommands>[1]) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+            await bot.api.setMyCommands(commands, scope);
+            return;
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (attempt === 2) {
+                console.error(`Failed to set commands after retry (${scope?.scope?.type || 'unknown'}):`, message);
+                return;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+    }
+}
+
 // STARTUP: Set Bot Commands (Menu Button)
 // STARTUP: Set Bot Commands (Menu Button)
 // 1. Default commands for everyone
-bot.api.setMyCommands([
+void safeSetMyCommands([
     { command: "start", description: "Mulai Bot / Restart" },
     { command: "aktivasi", description: "Aktivasi Akun via Email" },
     { command: "help", description: "Daftar Perintah Lengkap" },
-], { scope: { type: "default" } }).catch(console.error);
+], { scope: { type: "default" } });
 
 // 2. Special commands for Admin ID
 if (ADMIN_ID) {
-    bot.api.setMyCommands([
+    void safeSetMyCommands([
         { command: "admin", description: "👮 Panel Admin" },
         { command: "tesexp", description: "🧪 Test Expire (Debug)" },
         { command: "data", description: "📂 Export Data User" },
@@ -252,7 +268,7 @@ if (ADMIN_ID) {
         { command: "set_cookie", description: "🍪 Set Cookie" },
         { command: "set_channels", description: "📢 Set Channels" },
         { command: "start", description: "Mulai Bot / Restart" },
-    ], { scope: { type: "chat", chat_id: ADMIN_ID } }).catch(e => console.error("Failed to set admin commands:", e));
+    ], { scope: { type: "chat", chat_id: ADMIN_ID } });
 }
 
 // Handler: 📖 Panduan

@@ -437,7 +437,16 @@ async function runPuppeteerQueue() {
                 // Type email and submit using native Puppeteer keyboard
                 let inviteSuccess = false;
                 let inviteErr = "";
+
+                // ponytail: debug screenshots, remove when invite flow is confirmed working
+                const debugDir = './debug_screenshots';
+                if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
+                const ts = Date.now();
+
                 try {
+                    // Screenshot: before typing
+                    await page.screenshot({ path: `${debugDir}/invite_1_modal_open_${ts}.png`, fullPage: false });
+
                     // Focus the input
                     await page.focus('input[placeholder="Enter email address..."]');
                     
@@ -447,36 +456,111 @@ async function runPuppeteerQueue() {
                     await page.keyboard.up('Control');
                     await page.keyboard.press('Backspace');
                     
-                    // Type email with delay
-                    await page.type('input[placeholder="Enter email address..."]', email, { delay: 50 });
+                    // Type email with delay to simulate real typing
+                    await page.type('input[placeholder="Enter email address..."]', email, { delay: 80 });
                     await randomDelay(800, 1200);
-                    
-                    // Press Enter to convert to a chip/tag (CRITICAL for Canva React input)
-                    await page.keyboard.press('Enter');
-                    await randomDelay(1000, 1500);
 
-                    // Click Send invitations button
-                    const clicked = await page.evaluate(() => {
+                    // Screenshot: after typing, before Enter
+                    await page.screenshot({ path: `${debugDir}/invite_2_typed_${ts}.png`, fullPage: false });
+
+                    // Press Tab first (some Canva versions use Tab to create chip)
+                    await page.keyboard.press('Tab');
+                    await randomDelay(500, 800);
+                    
+                    // Also try Enter as fallback chip conversion
+                    // Re-focus in case Tab moved focus away
+                    try {
+                        await page.focus('input[placeholder="Enter email address..."]');
+                    } catch { /* input may be gone if chip was created */ }
+                    await page.keyboard.press('Enter');
+                    await randomDelay(1500, 2000);
+
+                    // Screenshot: after chip conversion attempt
+                    await page.screenshot({ path: `${debugDir}/invite_3_chip_${ts}.png`, fullPage: false });
+
+                    // Check if Send button is enabled (not disabled)
+                    const sendBtnState = await page.evaluate(() => {
                         const buttons = Array.from(document.querySelectorAll('button'));
                         const submitBtn = buttons.find(btn => {
                             const txt = btn.textContent || '';
                             return txt.includes('Send invitations') || txt.includes('Undang');
-                        }) as HTMLElement;
-
-                        if (submitBtn) {
-                            submitBtn.click();
-                            return true;
-                        }
-                        return false;
+                        });
+                        if (!submitBtn) return { found: false, disabled: false, text: '' };
+                        return { 
+                            found: true, 
+                            disabled: submitBtn.disabled || submitBtn.getAttribute('aria-disabled') === 'true',
+                            text: submitBtn.textContent?.trim() || ''
+                        };
                     });
 
-                    if (clicked) {
-                        await randomDelay(4000, 5000); // Wait for invitation submission
-                        inviteSuccess = true;
+                    console.log(`      📋 Send button: found=${sendBtnState.found}, disabled=${sendBtnState.disabled}, text="${sendBtnState.text}"`);
+
+                    if (!sendBtnState.found) {
+                        inviteErr = "Send button not found in DOM";
+                    } else if (sendBtnState.disabled) {
+                        inviteErr = `Send button is DISABLED (email chip may not have been created). Button text: "${sendBtnState.text}"`;
                     } else {
-                        inviteErr = "Send button not found";
+                        // Click Send invitations button
+                        await page.evaluate(() => {
+                            const buttons = Array.from(document.querySelectorAll('button'));
+                            const submitBtn = buttons.find(btn => {
+                                const txt = btn.textContent || '';
+                                return txt.includes('Send invitations') || txt.includes('Undang');
+                            }) as HTMLElement;
+                            submitBtn.click();
+                        });
+
+                        // Screenshot: right after clicking send
+                        await randomDelay(2000, 3000);
+                        await page.screenshot({ path: `${debugDir}/invite_4_after_send_${ts}.png`, fullPage: false });
+
+                        // Wait for modal to close or success indication
+                        // Check if modal closed (input field disappeared)
+                        const modalClosed = await page.waitForSelector(
+                            'input[placeholder="Enter email address..."]', 
+                            { hidden: true, timeout: 8000 }
+                        ).then(() => true).catch(() => false);
+
+                        console.log(`      📋 Modal closed after send: ${modalClosed}`);
+
+                        if (modalClosed) {
+                            // Verify: Check if member count increased or email appears in table
+                            await randomDelay(2000, 3000);
+                            const postInviteCheck = await page.evaluate((targetEmail: string) => {
+                                // Check member count in header
+                                const elements = Array.from(document.querySelectorAll('h1, h2, h3, span, div'));
+                                let memberCount = 0;
+                                for (const el of elements) {
+                                    const match = (el.textContent || '').match(/(?:People|Anggota|Orang)\s*\((\d+)\)/i);
+                                    if (match) { memberCount = parseInt(match[1]); break; }
+                                }
+                                // Check if email is in the table
+                                const rows = Array.from(document.querySelectorAll('tbody tr'));
+                                const emailInTable = rows.some(row => {
+                                    const text = (row.textContent || '').toLowerCase();
+                                    return text.includes(targetEmail.toLowerCase());
+                                });
+                                return { memberCount, emailInTable };
+                            }, email);
+
+                            console.log(`      📋 Post-invite: memberCount=${postInviteCheck.memberCount}, emailInTable=${postInviteCheck.emailInTable}`);
+
+                            // Screenshot: final state
+                            await page.screenshot({ path: `${debugDir}/invite_5_final_${ts}.png`, fullPage: false });
+
+                            if (postInviteCheck.emailInTable) {
+                                inviteSuccess = true;
+                            } else {
+                                inviteErr = `Modal closed but email NOT found in table (memberCount=${postInviteCheck.memberCount})`;
+                            }
+                        } else {
+                            // Modal still open — invite probably failed
+                            await page.screenshot({ path: `${debugDir}/invite_5_modal_stuck_${ts}.png`, fullPage: false });
+                            inviteErr = "Modal did not close after clicking Send — invite likely failed";
+                        }
                     }
                 } catch (err: any) {
+                    await page.screenshot({ path: `${debugDir}/invite_error_${ts}.png`, fullPage: false }).catch(() => {});
                     inviteErr = err.message;
                 }
 
