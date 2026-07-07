@@ -23,13 +23,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
       
-      - name: Install Chrome and Xvfb dependencies
+      - name: Install Xvfb dependency
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            chromium-browser \
-            chromium-chromedriver \
-            xvfb
+          sudo apt-get install -y xvfb
       
       - name: Run Queue Processor
         env:
