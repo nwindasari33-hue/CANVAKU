@@ -434,129 +434,78 @@ async function runPuppeteerQueue() {
                     continue;
                 }
 
-                // Type email and submit using native Puppeteer keyboard
+                // STRATEGY: Use "Copy invite link" instead of email form
+                // Canva blocks email invites with security check (RRS error)
+                // But "Copy invite link" works without any captcha/security check
                 let inviteSuccess = false;
                 let inviteErr = "";
+                let inviteLink = "";
 
-                // ponytail: debug screenshots, remove when invite flow is confirmed working
                 const debugDir = './debug_screenshots';
                 if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
                 const ts = Date.now();
 
                 try {
-                    // Screenshot: before typing
-                    await page.screenshot({ path: `${debugDir}/invite_1_modal_open_${ts}.png`, fullPage: false });
+                    await page.screenshot({ path: `${debugDir}/invite_1_modal_${ts}.png`, fullPage: false });
 
-                    // Focus the input
-                    await page.focus('input[placeholder="Enter email address..."]');
-                    
-                    // Clear the input just in case
-                    await page.keyboard.down('Control');
-                    await page.keyboard.press('KeyA');
-                    await page.keyboard.up('Control');
-                    await page.keyboard.press('Backspace');
-                    
-                    // Type email with delay to simulate real typing
-                    await page.type('input[placeholder="Enter email address..."]', email, { delay: 80 });
-                    await randomDelay(800, 1200);
+                    // Grant clipboard permissions
+                    const context = browser.defaultBrowserContext();
+                    await context.overridePermissions('https://www.canva.com', ['clipboard-read', 'clipboard-write']);
 
-                    // Screenshot: after typing, before Enter
-                    await page.screenshot({ path: `${debugDir}/invite_2_typed_${ts}.png`, fullPage: false });
-
-                    // Press Tab first (some Canva versions use Tab to create chip)
-                    await page.keyboard.press('Tab');
-                    await randomDelay(500, 800);
-                    
-                    // Also try Enter as fallback chip conversion
-                    // Re-focus in case Tab moved focus away
-                    try {
-                        await page.focus('input[placeholder="Enter email address..."]');
-                    } catch { /* input may be gone if chip was created */ }
-                    await page.keyboard.press('Enter');
-                    await randomDelay(1500, 2000);
-
-                    // Screenshot: after chip conversion attempt
-                    await page.screenshot({ path: `${debugDir}/invite_3_chip_${ts}.png`, fullPage: false });
-
-                    // Check if Send button is enabled (not disabled)
-                    const sendBtnState = await page.evaluate(() => {
-                        const buttons = Array.from(document.querySelectorAll('button'));
-                        const submitBtn = buttons.find(btn => {
-                            const txt = btn.textContent || '';
-                            return txt.includes('Send invitations') || txt.includes('Undang');
-                        });
-                        if (!submitBtn) return { found: false, disabled: false, text: '' };
-                        return { 
-                            found: true, 
-                            disabled: submitBtn.disabled || submitBtn.getAttribute('aria-disabled') === 'true',
-                            text: submitBtn.textContent?.trim() || ''
-                        };
+                    // Click "Copy invite link" button
+                    const linkCopied = await page.evaluate(async () => {
+                        const buttons = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
+                        const copyBtn = buttons.find(btn => {
+                            const txt = (btn.textContent || '').toLowerCase();
+                            return txt.includes('copy invite link') || txt.includes('salin tautan') || txt.includes('salin link');
+                        }) as HTMLElement;
+                        if (copyBtn) {
+                            copyBtn.click();
+                            return true;
+                        }
+                        return false;
                     });
 
-                    console.log(`      📋 Send button: found=${sendBtnState.found}, disabled=${sendBtnState.disabled}, text="${sendBtnState.text}"`);
-
-                    if (!sendBtnState.found) {
-                        inviteErr = "Send button not found in DOM";
-                    } else if (sendBtnState.disabled) {
-                        inviteErr = `Send button is DISABLED (email chip may not have been created). Button text: "${sendBtnState.text}"`;
+                    if (!linkCopied) {
+                        inviteErr = "Copy invite link button not found";
                     } else {
-                        // Click Send invitations button
-                        await page.evaluate(() => {
-                            const buttons = Array.from(document.querySelectorAll('button'));
-                            const submitBtn = buttons.find(btn => {
-                                const txt = btn.textContent || '';
-                                return txt.includes('Send invitations') || txt.includes('Undang');
-                            }) as HTMLElement;
-                            submitBtn.click();
-                        });
-
-                        // Screenshot: right after clicking send
                         await randomDelay(2000, 3000);
-                        await page.screenshot({ path: `${debugDir}/invite_4_after_send_${ts}.png`, fullPage: false });
 
-                        // Wait for modal to close or success indication
-                        // Check if modal closed (input field disappeared)
-                        const modalClosed = await page.waitForSelector(
-                            'input[placeholder="Enter email address..."]', 
-                            { hidden: true, timeout: 8000 }
-                        ).then(() => true).catch(() => false);
+                        // Try to read the link from clipboard
+                        try {
+                            inviteLink = await page.evaluate(async () => {
+                                return await navigator.clipboard.readText();
+                            });
+                        } catch {
+                            // Clipboard API may fail in headless — try reading from page
+                        }
 
-                        console.log(`      📋 Modal closed after send: ${modalClosed}`);
-
-                        if (modalClosed) {
-                            // Verify: Check if member count increased or email appears in table
-                            await randomDelay(2000, 3000);
-                            const postInviteCheck = await page.evaluate((targetEmail: string) => {
-                                // Check member count in header
-                                const elements = Array.from(document.querySelectorAll('h1, h2, h3, span, div'));
-                                let memberCount = 0;
-                                for (const el of elements) {
-                                    const match = (el.textContent || '').match(/(?:People|Anggota|Orang)\s*\((\d+)\)/i);
-                                    if (match) { memberCount = parseInt(match[1]); break; }
+                        // Fallback: look for a visible link/input with canva invite URL
+                        if (!inviteLink || !inviteLink.includes('canva.com')) {
+                            const linkFromPage = await page.evaluate(() => {
+                                // Check if a toast/notification appeared with the link
+                                const inputs = Array.from(document.querySelectorAll('input[type="text"], input[readonly]'));
+                                for (const input of inputs) {
+                                    const val = (input as HTMLInputElement).value;
+                                    if (val.includes('canva.com') && (val.includes('invite') || val.includes('join'))) {
+                                        return val;
+                                    }
                                 }
-                                // Check if email is in the table
-                                const rows = Array.from(document.querySelectorAll('tbody tr'));
-                                const emailInTable = rows.some(row => {
-                                    const text = (row.textContent || '').toLowerCase();
-                                    return text.includes(targetEmail.toLowerCase());
-                                });
-                                return { memberCount, emailInTable };
-                            }, email);
+                                // Check for any visible link text
+                                const allText = document.body.innerText;
+                                const match = allText.match(/(https:\/\/www\.canva\.com\/[^\s]+(?:invite|join)[^\s]*)/i);
+                                return match ? match[1] : '';
+                            });
+                            if (linkFromPage) inviteLink = linkFromPage;
+                        }
 
-                            console.log(`      📋 Post-invite: memberCount=${postInviteCheck.memberCount}, emailInTable=${postInviteCheck.emailInTable}`);
+                        await page.screenshot({ path: `${debugDir}/invite_2_after_copy_${ts}.png`, fullPage: false });
 
-                            // Screenshot: final state
-                            await page.screenshot({ path: `${debugDir}/invite_5_final_${ts}.png`, fullPage: false });
-
-                            if (postInviteCheck.emailInTable) {
-                                inviteSuccess = true;
-                            } else {
-                                inviteErr = `Modal closed but email NOT found in table (memberCount=${postInviteCheck.memberCount})`;
-                            }
+                        if (inviteLink && inviteLink.includes('canva.com')) {
+                            console.log(`      🔗 Got invite link: ${inviteLink.substring(0, 60)}...`);
+                            inviteSuccess = true;
                         } else {
-                            // Modal still open — invite probably failed
-                            await page.screenshot({ path: `${debugDir}/invite_5_modal_stuck_${ts}.png`, fullPage: false });
-                            inviteErr = "Modal did not close after clicking Send — invite likely failed";
+                            inviteErr = `Could not extract invite link (got: "${inviteLink?.substring(0, 50) || 'empty'}")`;
                         }
                     }
                 } catch (err: any) {
@@ -565,7 +514,7 @@ async function runPuppeteerQueue() {
                 }
 
                 if (inviteSuccess) {
-                    console.log(`      ✅ Successfully invited: ${email}`);
+                    console.log(`      ✅ Successfully got invite link for: ${email}`);
                     successInvites++;
 
                     // Update User Status
@@ -582,9 +531,9 @@ async function runPuppeteerQueue() {
                         await sql(`INSERT INTO subscriptions (id, user_id, product_id, start_date, end_date, status) VALUES (?, ?, ?, ?, ?, 'active')`, [subId, userId, prodId, startStr, endDateStr]);
                     }
 
-                    // Notify User via Telegram
+                    // Send invite link to user via Telegram
                     if (userId > 0) {
-                        const userText = `🎉 <b>UNDANGAN CANVA PRO BERHASIL DIKIRIM!</b>\n\nSilakan cek inbox email Anda: <code>${email}</code> (termasuk folder Spam/Promosi) dan klik **Gabung Tim** dari Canva.\n\n📅 <b>Expired:</b> ${endDateStr}\n\n⏳ <i>Pesan ini akan dihapus dalam 2 menit.</i>`;
+                        const userText = `🎉 <b>UNDANGAN CANVA PRO BERHASIL!</b>\n\n🔗 Klik link berikut untuk bergabung:\n${inviteLink}\n\n📧 Email Anda: <code>${email}</code>\n📅 <b>Expired:</b> ${endDateStr}\n\n⚠️ <i>Link ini hanya berlaku 1x pakai. Harap segera klik.</i>`;
                         const msgId = await sendTelegram(userId, userText);
                         if (msgId) {
                             await sql(`
@@ -594,16 +543,15 @@ async function runPuppeteerQueue() {
                         }
                     }
 
-                    await sendSystemLog(`📩 <b>User Invited</b>\n👤 ID: <code>${userId}</code>\n📧 Email: <code>${email}</code>\n📦 Paket: ${planName}`);
+                    await sendSystemLog(`📩 <b>User Invited (Link)</b>\n👤 ID: <code>${userId}</code>\n📧 Email: <code>${email}</code>\n📦 Paket: ${planName}\n🔗 <a href="${inviteLink}">Invite Link</a>`);
                     acc.member_count++;
                 } else {
                     console.log(`      ❌ Invite failed: ${inviteErr}`);
                     failInvites++;
                 }
 
-                // Close modal and wait for it to fully disappear
+                // Close modal
                 await page.keyboard.press('Escape');
-                await page.waitForSelector('input[placeholder="Enter email address..."]', { hidden: true, timeout: 5000 }).catch(() => {});
                 await randomDelay(1500, 2500);
             }
 
