@@ -620,14 +620,15 @@ bot.callbackQuery("check_join", async (ctx) => {
 
 
 // Helper: Trigger GitHub Action
-async function triggerGithubAction() {
+async function triggerGithubAction(): Promise<{ success: boolean; message: string }> {
     const ghUser = process.env.GITHUB_USERNAME;
     const ghRepo = process.env.GITHUB_REPO;
     const ghToken = process.env.GITHUB_TOKEN;
 
     if (!ghUser || !ghRepo || !ghToken) {
-        console.warn("⚠️ GitHub Actions credentials missing (GITHUB_USERNAME, GITHUB_REPO, GITHUB_TOKEN). Auto-trigger skipped.");
-        return;
+        const msg = "⚠️ GITHUB_USERNAME, GITHUB_REPO, atau GITHUB_TOKEN belum diatur di env/Vercel!";
+        console.warn(msg);
+        return { success: false, message: msg };
     }
 
     try {
@@ -642,8 +643,11 @@ async function triggerGithubAction() {
             }
         );
         console.log("🚀 GitHub Action triggered successfully.");
+        return { success: true, message: "GitHub Actions workflow berhasil dipicu!" };
     } catch (e: any) {
-        console.error("❌ Failed to trigger GitHub Action:", e.response?.data || e.message);
+        const details = e.response?.data?.message || e.message;
+        console.error("❌ Failed to trigger GitHub Action:", details);
+        return { success: false, message: `Gagal memicu GitHub Action: ${details}` };
     }
 }
 
@@ -664,11 +668,12 @@ bot.command("test_invite", async (ctx) => {
         );
 
         // 2. Trigger GitHub Action
-        triggerGithubAction();
+        const trigger = await triggerGithubAction();
 
         await ctx.reply(
-            `✅ <b>Masuk Antrian!</b>\n` +
-            `Sistem akan memproses invite dalam 1-5 menit via GitHub Action.\n` +
+            `✅ <b>Masuk Antrian!</b>\n\n` +
+            `📧 Email: <code>${email}</code>\n` +
+            `🚀 Status Trigger GHA: <b>${trigger.message}</b>\n\n` +
             `Bot akan mengirim notifikasi jika sudah berhasil.`,
             { parse_mode: "HTML" }
         );
@@ -2420,12 +2425,9 @@ bot.callbackQuery("test_invite", async (ctx) => {
     await ctx.reply("🤖 Menjalankan <b>Auto-Invite</b> Queue... (Wait)", { parse_mode: "HTML" });
 
     if (process.env.VERCEL) {
-        await ctx.reply(
-            "ℹ️ <b>Mode Serverless (Vercel):</b>\n" +
-            "Auto-Invite berjalan otomatis setiap jam via GitHub Actions.\n\n" +
-            "Tombol tes ini hanya berfungsi di Local Mode.",
-            { parse_mode: "HTML" }
-        );
+        await ctx.reply("🚀 <b>Serverless Mode (Vercel):</b> Memulai trigger GitHub Actions...", { parse_mode: "HTML" });
+        const trigger = await triggerGithubAction();
+        await ctx.reply(`🤖 <b>Hasil Trigger GHA:</b>\n${trigger.message}`, { parse_mode: "HTML" });
     } else {
         await ctx.reply("🚀 <b>Local Mode Detected:</b> Executing `npm run process-queue`...", { parse_mode: "HTML" });
         exec("npm run process-queue", (error, stdout, stderr) => {
@@ -2445,12 +2447,9 @@ bot.callbackQuery("test_kick", async (ctx) => {
     await ctx.reply("🤖 Menjalankan <b>Auto-Kick</b> Job... (Wait)", { parse_mode: "HTML" });
 
     if (process.env.VERCEL) {
-        await ctx.reply(
-            "ℹ️ <b>Mode Serverless (Vercel):</b>\n" +
-            "Auto-Kick berjalan otomatis setiap jam via GitHub Actions.\n\n" +
-            "Tombol tes ini hanya berfungsi di Local Mode.",
-            { parse_mode: "HTML" }
-        );
+        await ctx.reply("🚀 <b>Serverless Mode (Vercel):</b> Memulai trigger GitHub Actions...", { parse_mode: "HTML" });
+        const trigger = await triggerGithubAction();
+        await ctx.reply(`🤖 <b>Hasil Trigger GHA:</b>\n${trigger.message}`, { parse_mode: "HTML" });
     } else {
         await ctx.reply("🚀 <b>Local Mode Detected:</b> Executing `npm run auto-kick`...", { parse_mode: "HTML" });
         exec("npm run auto-kick", (error, stdout, stderr) => {
@@ -2458,7 +2457,6 @@ bot.callbackQuery("test_kick", async (ctx) => {
                 ctx.reply(`❌ <b>Error:</b>\n<pre>${error.message.substring(0, 200)}</pre>`, { parse_mode: "HTML" });
                 return;
             }
-            // Send truncated output
             const out = stdout.length > 500 ? stdout.substring(stdout.length - 500) : stdout;
             ctx.reply(`✅ <b>Done:</b>\n<pre>${out}</pre>`, { parse_mode: "HTML" });
         });
@@ -2706,7 +2704,10 @@ bot.command("forceexpire", async (ctx) => {
         // Update Subscription jadi Expired (H+2 Menit untuk Test Realtime Kick)
         await sql("UPDATE subscriptions SET end_date = datetime('now', '+7 hours', '+2 minutes'), status = 'active' WHERE user_id = ?", [userId]);
 
-        await ctx.reply(`✅ User <b>${email}</b> akan EXPIRED dalam 2 menit.\nSilakan pantau Auto-Kick.`, { parse_mode: "HTML" });
+        // Trigger GitHub Action
+        const trigger = await triggerGithubAction();
+
+        await ctx.reply(`✅ User <b>${email}</b> akan EXPIRED dalam 2 menit.\n🚀 Status Trigger GHA: <b>${trigger.message}</b>`, { parse_mode: "HTML" });
     } catch (e: any) {
         await ctx.reply(`❌ Error DB: ${e.message}`);
     }
@@ -2718,13 +2719,20 @@ bot.command("testkick", async (ctx) => {
 
     await ctx.reply("🤖 Menjalankan Auto-Kick Script... (Mohon tunggu)");
 
-    // Serverless Mode: Cannot run exec
-    await ctx.reply(
-        "ℹ️ <b>Mode Serverless (Vercel):</b>\n" +
-        "Auto-Kick berjalan otomatis setiap jam via GitHub Actions.\n\n" +
-        "Perintah tes ini hanya berfungsi di Local Mode.",
-        { parse_mode: "HTML" }
-    );
+    if (process.env.VERCEL) {
+        await ctx.reply("🚀 <b>Serverless Mode (Vercel):</b> Memulai trigger GitHub Actions...", { parse_mode: "HTML" });
+        const trigger = await triggerGithubAction();
+        await ctx.reply(`🤖 <b>Hasil Trigger GHA:</b>\n${trigger.message}`, { parse_mode: "HTML" });
+    } else {
+        await ctx.reply("🚀 <b>Local Mode:</b> Executing `npm run auto-kick`...", { parse_mode: "HTML" });
+        exec("npm run auto-kick", (error, stdout, stderr) => {
+            if (error) {
+                ctx.reply(`❌ Error: ${error.message}`);
+                return;
+            }
+            ctx.reply(`✅ Done:\n<pre>${stdout}</pre>`, { parse_mode: "HTML" });
+        });
+    }
 });
 
 // Admin Command: Set Log Topic for Full Slot Notifications
