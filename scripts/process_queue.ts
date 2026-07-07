@@ -434,34 +434,53 @@ async function runPuppeteerQueue() {
                     continue;
                 }
 
-                // Type email and submit
-                const inviteResult = await page.evaluate(async (targetEmail: string) => {
-                    const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
-                    try {
-                        const input = document.querySelector('input[placeholder="Enter email address..."]') as HTMLInputElement;
-                        if (!input) return { success: false, message: 'Email input field not found' };
-                        
-                        input.focus();
-                        input.value = targetEmail;
-                        input.dispatchEvent(new Event('input', { bubbles: true }));
-                        await sleep(1000);
+                // Type email and submit using native Puppeteer keyboard
+                let inviteSuccess = false;
+                let inviteErr = "";
+                try {
+                    // Focus the input
+                    await page.focus('input[placeholder="Enter email address..."]');
+                    
+                    // Clear the input just in case
+                    await page.keyboard.down('Control');
+                    await page.keyboard.press('KeyA');
+                    await page.keyboard.up('Control');
+                    await page.keyboard.press('Backspace');
+                    
+                    // Type email with delay
+                    await page.type('input[placeholder="Enter email address..."]', email, { delay: 50 });
+                    await randomDelay(800, 1200);
+                    
+                    // Press Enter to convert to a chip/tag (CRITICAL for Canva React input)
+                    await page.keyboard.press('Enter');
+                    await randomDelay(1000, 1500);
 
-                        const submitBtn = Array.from(document.querySelectorAll('button')).find(btn => {
+                    // Click Send invitations button
+                    const clicked = await page.evaluate(() => {
+                        const buttons = Array.from(document.querySelectorAll('button'));
+                        const submitBtn = buttons.find(btn => {
                             const txt = btn.textContent || '';
                             return txt.includes('Send invitations') || txt.includes('Undang');
                         }) as HTMLElement;
 
-                        if (!submitBtn) return { success: false, message: 'Send button not found' };
-                        
-                        submitBtn.click();
-                        await sleep(3000);
-                        return { success: true };
-                    } catch (err: any) {
-                        return { success: false, message: err.message };
-                    }
-                }, email);
+                        if (submitBtn) {
+                            submitBtn.click();
+                            return true;
+                        }
+                        return false;
+                    });
 
-                if (inviteResult.success) {
+                    if (clicked) {
+                        await randomDelay(4000, 5000); // Wait for invitation submission
+                        inviteSuccess = true;
+                    } else {
+                        inviteErr = "Send button not found";
+                    }
+                } catch (err: any) {
+                    inviteErr = err.message;
+                }
+
+                if (inviteSuccess) {
                     console.log(`      ✅ Successfully invited: ${email}`);
                     successInvites++;
 
@@ -494,7 +513,7 @@ async function runPuppeteerQueue() {
                     await sendSystemLog(`📩 <b>User Invited</b>\n👤 ID: <code>${userId}</code>\n📧 Email: <code>${email}</code>\n📦 Paket: ${planName}`);
                     acc.member_count++;
                 } else {
-                    console.log(`      ❌ Invite failed: ${inviteResult.message}`);
+                    console.log(`      ❌ Invite failed: ${inviteErr}`);
                     failInvites++;
                 }
 
