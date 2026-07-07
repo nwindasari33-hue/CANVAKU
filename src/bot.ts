@@ -1832,24 +1832,31 @@ bot.command("tesexp", async (ctx) => {
     if (isNaN(minutes)) return ctx.reply("❌ Menit harus angka.");
 
     try {
-        const userRes = await sql("SELECT id FROM users WHERE email = ?", [email]);
+        const userRes = await sql("SELECT id, assigned_node_id FROM users WHERE email = ?", [email]);
         if (userRes.rows.length === 0) return ctx.reply("❌ User tidak ditemukan di database.");
 
-        const userId = userRes.rows[0].id;
+        for (const row of userRes.rows) {
+            const userId = row.id;
+            await sql(`
+                UPDATE subscriptions 
+                SET status = 'active', 
+                    end_date = datetime('now', '+7 hours', '+${minutes} minutes') 
+                WHERE user_id = ?
+            `, [userId]);
+            if (row.assigned_node_id !== null) {
+                await sql("UPDATE users SET status = 'active' WHERE id = ?", [userId]);
+            }
+        }
 
-        // Update Subscriptions: Active but Expire in X minutes (WIB Adjusted)
-        await sql(`
-            UPDATE subscriptions 
-            SET status = 'active', 
-                end_date = datetime('now', '+7 hours', '+${minutes} minutes') 
-            WHERE user_id = ?
-        `, [userId]);
+        // Trigger GitHub Action
+        const trigger = await triggerGithubAction();
 
         await ctx.reply(
             `🧪 <b>Test Expire Set!</b>\n\n` +
             `📧 User: <code>${email}</code>\n` +
-            `⏳ Expire In: ${minutes} menit\n\n` +
-            `User akan dianggap 'Active' sekarang, tapi akan 'Expired' dan kena kick otomatis setelah ${minutes} menit.`,
+            `⏳ Expire In: ${minutes} menit\n` +
+            `🚀 Status Trigger GHA: <b>${trigger.message}</b>\n\n` +
+            `Semua akun dengan email ini diatur 'Active' sekarang, dan akan otomatis 'Expired' setelah ${minutes} menit.`,
             { parse_mode: "HTML" }
         );
 
@@ -2695,19 +2702,23 @@ bot.command("forceexpire", async (ctx) => {
     if (!email) return ctx.reply("❌ Format: /forceexpire <email>");
 
     try {
-        // Cari ID user dulu berdasarkan email
-        const userRes = await sql("SELECT id FROM users WHERE email = ?", [email]);
+        // Cari semua record user dengan email tersebut (bisa ganda karena ID TG berbeda)
+        const userRes = await sql("SELECT id, assigned_node_id FROM users WHERE email = ?", [email]);
         if (userRes.rows.length === 0) return ctx.reply("❌ User tidak ditemukan di DB.");
 
-        const userId = userRes.rows[0].id;
-
-        // Update Subscription jadi Expired (H+2 Menit untuk Test Realtime Kick)
-        await sql("UPDATE subscriptions SET end_date = datetime('now', '+7 hours', '+2 minutes'), status = 'active' WHERE user_id = ?", [userId]);
+        for (const row of userRes.rows) {
+            const userId = row.id;
+            // Update status & end date di database
+            await sql("UPDATE subscriptions SET end_date = datetime('now', '+7 hours', '+2 minutes'), status = 'active' WHERE user_id = ?", [userId]);
+            if (row.assigned_node_id !== null) {
+                await sql("UPDATE users SET status = 'active' WHERE id = ?", [userId]);
+            }
+        }
 
         // Trigger GitHub Action
         const trigger = await triggerGithubAction();
 
-        await ctx.reply(`✅ User <b>${email}</b> akan EXPIRED dalam 2 menit.\n🚀 Status Trigger GHA: <b>${trigger.message}</b>`, { parse_mode: "HTML" });
+        await ctx.reply(`✅ Semua akun/sub dengan email <b>${email}</b> telah diatur EXPIRED (2 menit).\n🚀 Status Trigger GHA: <b>${trigger.message}</b>`, { parse_mode: "HTML" });
     } catch (e: any) {
         await ctx.reply(`❌ Error DB: ${e.message}`);
     }
