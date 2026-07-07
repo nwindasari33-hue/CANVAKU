@@ -45,8 +45,8 @@ async function sendTelegram(message: string) {
             text: message,
             parse_mode: 'HTML'
         });
-    } catch (e) {
-        console.error("Telegram Error:", e);
+    } catch (e: any) {
+        console.error("Telegram Error:", e.response?.data || e.message);
     }
 }
 
@@ -72,19 +72,37 @@ async function syncMemberCount() {
         if (uaRes.rows.length > 0) globalUA = uaRes.rows[0].value as string;
     } catch { console.log("⚠️ Failed to fetch custom UA, using default."); }
 
-    const browser = await puppeteer.launch({
-        executablePath: chromePath,
-        headless: process.env.CI ? 'new' : false,
-        defaultViewport: null,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--start-maximized',
-            '--disable-notifications',
-            '--timezone=Asia/Jakarta'
-        ]
-    });
+    let browser: any;
+    try {
+        const versionRes = await axios.get('http://127.0.0.1:9222/json/version', { timeout: 3000 });
+        const wsEndpoint = versionRes.data.webSocketDebuggerUrl;
+        console.log(`🔌 Connecting to existing Chrome instance on port 9222...`);
+        browser = await puppeteer.connect({ browserWSEndpoint: wsEndpoint, defaultViewport: null });
+    } catch {
+        console.log(`🚀 Spawning new Chrome instance...`);
+        try {
+            browser = await puppeteer.launch({
+                executablePath: chromePath,
+                headless: false,
+                args: [
+                    '--no-sandbox', '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage', '--start-maximized',
+                    '--disable-blink-features=AutomationControlled'
+                ]
+            });
+        } catch (headedErr) {
+            console.log(`⚠️ Headed launch failed (${headedErr.message}), falling back to headless mode...`);
+            browser = await puppeteer.launch({
+                executablePath: chromePath,
+                headless: 'new',
+                args: [
+                    '--no-sandbox', '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage', '--start-maximized',
+                    '--disable-blink-features=AutomationControlled'
+                ]
+            });
+        }
+    }
 
     try {
         const page = await browser.newPage();
@@ -120,8 +138,7 @@ async function syncMemberCount() {
                 console.log(`   🍪 Loaded cookies for Account ${account.id}.`);
 
                 // Navigate
-                const teamId = account.team_id;
-                const peopleUrl = teamId ? `https://www.canva.com/brand/${teamId}/people` : `https://www.canva.com/settings/people`;
+                const peopleUrl = 'https://www.canva.com/settings/people';
 
                 await page.goto(peopleUrl, { waitUntil: 'networkidle2', timeout: 60000 });
 
