@@ -1,0 +1,21 @@
+
+node_modules
+.env
+.env.local
+dist
+*.log
+session.json
+auth_cookies.json
+auth_user_agent.txt
+catatandb.md
+# Sensitive Data
+session.json
+auth_cookies.json
+*.json.log
+www.canva.com*.json
+
+# Configs (Allowed)
+# package.json
+# tsconfig.json
+# vercel.json
+
