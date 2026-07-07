@@ -18,4 +18,6 @@ www.canva.com*.json
 # package.json
 # tsconfig.json
 # vercel.json
-
+# Chrome Profile
+chrome_profile
+chrome_profile/
