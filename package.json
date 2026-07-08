@@ -12,12 +12,15 @@
         "get-cookie": "ts-node scripts/get_cookie.ts",
         "auto-kick": "ts-node scripts/auto_kick.ts",
         "process-queue": "ts-node scripts/process_queue.ts",
+        "update-code": "ts-node scripts/update_invite_code.ts",
+        "verify-channel": "ts-node scripts/verify_channel.ts",
         "set-webhook": "ts-node scripts/set_webhook.ts",
         "revoke-stale": "ts-node scripts/revoke_stale.ts",
         "sync-members": "ts-node scripts/sync_member_count.ts",
         "verify-db": "ts-node scripts/verify_db.ts",
         "db:fix": "ts-node scripts/fix_consistency.ts",
-        "maintenance": "npm run process-queue && npm run auto-kick && npm run sync-members"
+        "maintenance": "npm run verify-channel && npm run process-queue && npm run auto-kick && npm run sync-members",
+        "manual-sync": "ts-node scripts/manual_full_sync.ts"
     },
     "keywords": [
         "telegram",

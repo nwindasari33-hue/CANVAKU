@@ -375,16 +375,16 @@ bot.hears("🔑 Lihat Kode", async (ctx) => {
         const userNodeRes = await sql("SELECT assigned_node_id FROM users WHERE id = ?", [userId]);
         const assignedNodeId = userNodeRes.rows[0]?.assigned_node_id as number;
 
+        const freshnessMs = 3 * 60 * 60 * 1000;
         let inviteCode = "";
-        let nodeInfo = "";
+        let codeUpdatedAt = "";
 
         if (assignedNodeId) {
             // Fetch code from specific node
-            const nodeRes = await sql("SELECT invite_code, email FROM canva_accounts WHERE id = ?", [assignedNodeId]);
-            if (nodeRes.rows.length > 0 && nodeRes.rows[0].invite_code) {
-                inviteCode = nodeRes.rows[0].invite_code as string;
-                // Obscure email for security (e.g. "team...1@gmail.com")
-                // nodeInfo = `\n🏢 <b>Node:</b> ${nodeRes.rows[0].email}`; 
+            const nodeRes = await sql("SELECT invite_code, invite_code_updated_at FROM canva_accounts WHERE id = ?", [assignedNodeId]);
+            if (nodeRes.rows.length > 0) {
+                inviteCode = (nodeRes.rows[0].invite_code || "") as string;
+                codeUpdatedAt = (nodeRes.rows[0].invite_code_updated_at || "") as string;
             }
         }
 
@@ -393,6 +393,8 @@ bot.hears("🔑 Lihat Kode", async (ctx) => {
             const codeRes = await sql("SELECT value FROM settings WHERE key = 'canva_invite_code'");
             if (codeRes.rows.length > 0 && codeRes.rows[0].value) {
                 inviteCode = codeRes.rows[0].value as string;
+                const tsRes = await sql("SELECT value FROM settings WHERE key = 'canva_invite_code_updated_at'");
+                codeUpdatedAt = (tsRes.rows[0]?.value || "") as string;
             }
         }
 
@@ -406,9 +408,20 @@ bot.hears("🔑 Lihat Kode", async (ctx) => {
             );
         }
 
+        const updatedMs = codeUpdatedAt ? new Date(codeUpdatedAt.replace(' ', 'T') + '+07:00').getTime() : 0;
+        if (!updatedMs || (Date.now() - updatedMs) > freshnessMs) {
+            return ctx.reply(
+                "⏳ <b>Kode Sedang Diperbarui</b>\n\n" +
+                "Kode Canva berubah otomatis sekitar setiap 3 jam.\n" +
+                "Kode yang tersimpan sudah terlalu lama, jadi sistem tidak menampilkan kode basi.\n\n" +
+                "Silakan coba lagi setelah proses invite berikutnya selesai.",
+                { parse_mode: "HTML" }
+            );
+        }
+
         const sub = subRes.rows[0];
         const endDateStr = sub.end_date as string;
-        const endDate = new Date(endDateStr.includes('T') ? endDateStr : endDateStr.replace(' ', 'T') + 'Z');
+        const endDate = new Date(endDateStr.includes('T') ? endDateStr : endDateStr.replace(' ', 'T') + '+07:00');
 
         // 3. Format and send code
         const keyboard = new InlineKeyboard()
@@ -636,7 +649,7 @@ bot.callbackQuery("check_join", async (ctx) => {
 
 
 // Helper: Trigger GitHub Action
-async function triggerGithubAction(): Promise<{ success: boolean; message: string }> {
+async function triggerGithubAction(eventType: string = "process_queue"): Promise<{ success: boolean; message: string }> {
     const ghUser = process.env.GITHUB_USERNAME;
     const ghRepo = process.env.GITHUB_REPO;
     const ghToken = process.env.GITHUB_TOKEN;
@@ -650,7 +663,7 @@ async function triggerGithubAction(): Promise<{ success: boolean; message: strin
     try {
         await axios.post(
             `https://api.github.com/repos/${ghUser}/${ghRepo}/dispatches`,
-            { event_type: "process_queue" },
+            { event_type: eventType },
             {
                 headers: {
                     Authorization: `Bearer ${ghToken}`,
@@ -702,11 +715,14 @@ bot.command("test_invite", async (ctx) => {
 // Helper: Check Team Limit & Next Slot
 async function checkTeamLimit(): Promise<{ isFull: boolean, nextSlot: string | null }> {
     try {
-        // 1. Get Current Count
-        const countRes = await sql("SELECT value FROM settings WHERE key = 'team_member_count'");
-        const count = countRes.rows.length > 0 ? parseInt(countRes.rows[0].value as string) : 0;
+        // 1. Get Current Count from Cluster (Multi-Account Aggregation)
+        const totalSlotsRes = await sql("SELECT COALESCE(SUM(max_slots), 0) as max, COALESCE(SUM(member_count), 0) as used FROM canva_accounts WHERE is_active=1");
+        const row = totalSlotsRes.rows[0];
 
-        if (count < 500) {
+        const currentCount = parseInt(row.used as any) || 0;
+        const maxSlot = parseInt(row.max as any) || 0;
+
+        if (currentCount < maxSlot) {
             return { isFull: false, nextSlot: null };
         }
 
@@ -815,6 +831,22 @@ async function handleActivation(ctx: any, emailInput: string) {
         const activeSub = subRes.rows.length > 0 ? subRes.rows[0] : null;
 
         // ============================================================
+        // GLOBAL EMAIL UNIQUENESS CHECK (ANTI-STEAL / DUPLICATION)
+        // ============================================================
+        if (emailInput !== savedEmail) { // Hanya cek jika email yang dimasukkan berbeda dengan miliknya sendiri
+            const duplicateCheck = await sql("SELECT id FROM users WHERE email = ? AND id != ?", [emailInput, userId]);
+            if (duplicateCheck.rows.length > 0 && !isAdmin(userId)) {
+                return ctx.reply(
+                    `⛔ <b>Akses Ditolak!</b>\n\n` +
+                    `Email <code>${emailInput}</code> sudah terdaftar dan diklaim oleh akun Telegram lain.\n` +
+                    `Satu email hanya boleh digunakan oleh satu akun Telegram untuk mencegah duplikasi.\n\n` +
+                    `<i>Gunakan alamat email Canva Anda yang lain.</i>`,
+                    { parse_mode: "HTML" }
+                );
+            }
+        }
+
+        // ============================================================
         // LOGIC: EXTENSION vs NEW ACCOUNT
         // ============================================================
         let isExtension = false;
@@ -913,7 +945,7 @@ async function handleActivation(ctx: any, emailInput: string) {
                 // SQLite `datetime('now')` is UTC. `datetime('now', 'localtime')` is local.
                 // Using `new Date(string)` handles ISO. 
 
-                const oldEndDate = new Date(dbDateStr.includes('T') ? dbDateStr : dbDateStr.replace(' ', 'T') + 'Z');
+                const oldEndDate = new Date(dbDateStr.includes('T') ? dbDateStr : dbDateStr.replace(' ', 'T') + '+07:00');
                 const newEndDateObj = new Date(oldEndDate.getTime() + (extendDays * 24 * 60 * 60 * 1000));
 
                 // Format back to SQLite string "YYYY-MM-DD HH:mm:ss"
@@ -936,7 +968,7 @@ async function handleActivation(ctx: any, emailInput: string) {
                             const dbDate = verifyRes.rows[0].end_date as string;
                             // Compare: The DB might return it slightly differently?
                             // Just check if it is > oldEndDate by margin
-                            const checkDate = new Date(dbDate.includes('T') ? dbDate : dbDate.replace(' ', 'T') + 'Z');
+                            const checkDate = new Date(dbDate.includes('T') ? dbDate : dbDate.replace(' ', 'T') + '+07:00');
 
                             if (checkDate.getTime() > oldEndDate.getTime() + 1000) { // Check if it moved forward
                                 success = true;
@@ -999,7 +1031,7 @@ async function handleActivation(ctx: any, emailInput: string) {
             if (activeSub && !isAdmin(userId)) {
                 // Ensure correct UTC parsing for DB string
                 const dbDate = activeSub.end_date as string;
-                const utcDate = new Date(dbDate.includes('T') ? dbDate : dbDate.replace(' ', 'T') + 'Z');
+                const utcDate = new Date(dbDate.includes('T') ? dbDate : dbDate.replace(' ', 'T') + '+07:00');
                 const expDate = TimeUtils.format(utcDate);
                 return ctx.reply(
                     `⛔ <b>Akses Ditolak!</b>\n\n` +
@@ -1012,29 +1044,70 @@ async function handleActivation(ctx: any, emailInput: string) {
         }
 
         // ============================================================
-        // FINAL: MASUK QUEUE (Hanya untuk New Invite)
+        // FINAL: INSTANT ACTIVATION (Via Invite Code)
         // ============================================================
 
-        // 3. Simpan Email & Masukkan Antrian Invite
+        // 3. Find an available Canva node
+        const nodeRes = await sql("SELECT id, invite_code FROM canva_accounts WHERE is_active = 1 AND (max_slots - member_count) > 0 ORDER BY id ASC LIMIT 1");
+        if (nodeRes.rows.length === 0) {
+            return ctx.reply("⛔ <b>Gagal!</b>\n\nTidak ada slot kosong atau node aktif. Silakan hubungi Admin.", { parse_mode: "HTML" });
+        }
+        const assignedNodeId = nodeRes.rows[0].id as number;
+        let inviteCode = (nodeRes.rows[0].invite_code || "") as string;
+
+        if (!inviteCode) {
+            const codeRes = await sql("SELECT value FROM settings WHERE key = 'canva_invite_code'");
+            if (codeRes.rows.length > 0 && codeRes.rows[0].value) {
+                inviteCode = codeRes.rows[0].value as string;
+            }
+        }
+
+        // 4. Update user to active immediately
         await sql(
-            `UPDATE users SET email = ?, status = 'pending_invite' WHERE id = ?`,
-            [emailInput, userId]
+            `UPDATE users SET email = ?, status = 'active', assigned_node_id = ?, selected_product_id = NULL WHERE id = ?`,
+            [emailInput, assignedNodeId, userId]
         );
 
-        // 4. Trigger Action
-        triggerGithubAction();
+        // 5. Create Subscription
+        let durationDays = 30;
+        let planNameStr = "1 Bulan Free";
+        if (selectedProd === 3) { durationDays = 180; planNameStr = "6 Bulan Premium"; }
+        else if (selectedProd === 4) { durationDays = 360; planNameStr = "12 Bulan Premium"; }
+
+        const startStr = TimeUtils.getWIBISOString();
+        const endDateObj = TimeUtils.addDaysWIB(durationDays);
+        const endDateStr = endDateObj.toISOString().replace('T', ' ').substring(0, 19);
+        const subId = `sub_${Date.now()}_${userId}`;
+
+        await sql(
+            `INSERT INTO subscriptions (id, user_id, product_id, start_date, end_date, status) VALUES (?, ?, ?, ?, ?, 'active')`, 
+            [subId, userId, selectedProd, startStr, endDateStr]
+        );
+
+        // Optimistically increment member count
+        await sql("UPDATE canva_accounts SET member_count = member_count + 1 WHERE id = ?", [assignedNodeId]);
+
+        // 6. Reply with success & code
+        const keyboard = new InlineKeyboard()
+            .url("🔗 Buka Halaman Join", "https://www.canva.com/class/join");
 
         const sentMsg = await ctx.reply(
-            `✅ <b>Permintaan Diterima!</b>\n\n` +
+            `✅ <b>Aktivasi Berhasil!</b>\n\n` +
             `Email: <code>${emailInput}</code>\n` +
-            `Paket: <b>${selectedProd === 3 ? "6 Bulan Premium" : (selectedProd === 4 ? "12 Bulan (Stack)" : "1 Bulan Free")}</b>\n` +
-            `Status: <b>Masuk Antrian Invite</b>\n\n` +
-            `Bot akan mengirim notifikasi saat invite berhasil dikirim (est. 1-5 menit).`,
-            { parse_mode: "HTML" }
+            `Paket: <b>${planNameStr}</b>\n` +
+            `Status: <b>Aktif</b>\n\n` +
+            `🔑 <b>KODE AKSES CANVA:</b>\n` +
+            `<code>${inviteCode || "Belum Tersedia"}</code>\n\n` +
+            `<b>Cara Pakai:</b>\n` +
+            `1. Klik tombol di bawah.\n` +
+            `2. Masukkan kode di atas.\n` +
+            `3. Klik Join/Gabung.\n\n` +
+            `⏳ <b>Expired:</b> ${TimeUtils.format(endDateObj)}`,
+            { parse_mode: "HTML", reply_markup: keyboard }
         );
 
-        // 5. Save Message ID & Reset Selection
-        await sql("UPDATE users SET last_message_id = ?, selected_product_id = NULL WHERE id = ?", [sentMsg.message_id, userId]);
+        // 7. Save Message ID
+        await sql("UPDATE users SET last_message_id = ? WHERE id = ?", [sentMsg.message_id, userId]);
 
     } catch (error: any) {
         await ctx.reply(`❌ Error System: ${error.message}`);
@@ -1495,7 +1568,8 @@ const showAdminPanel = async (ctx: MyContext) => {
         .text("🧪 Test Auto-Invite", "test_invite").text("🦶 Test Auto-Kick", "test_kick").row()
         .text("🍪 Status Cookie", "adm_cookie").text("🏭 List Accounts", "adm_list_accounts").row()
         .text("💾 Database Tools", "adm_db_menu").text("📋 List Channel", "adm_list_ch").row()
-        .text("➕ Add Point Manual", "adm_help_addpoint").text("💸 Set Donasi", "adm_set_donasi").row();
+        .text("➕ Add Point Manual", "adm_help_addpoint").text("💸 Set Donasi", "adm_set_donasi").row()
+        .text("🔄 Sinkronisasi Manual", "adm_refresh_code").row();
 
     await ctx.reply(
         `<b>Panel Admin Super v2.0</b>\n\n` +
@@ -1504,7 +1578,8 @@ const showAdminPanel = async (ctx: MyContext) => {
         `👇 <b>Panduan Cepat Link:</b>\n` +
         `• <b>Set Log Topik:</b> Set notifikasi warning slot penuh.\n` +
         `• <b>Force Expire:</b> Test kick user.\n` +
-        `• <b>Menu Hapus:</b> (Hati-hati) Hard/Soft Delete user.\n`,
+        `• <b>Menu Hapus:</b> (Hati-hati) Hard/Soft Delete user.\n` +
+        `• <b>Sinkronisasi Manual:</b> Sapu bersih & cek semua node.\n`,
         {
             parse_mode: "HTML",
             reply_markup: adminKeyboard
@@ -1554,6 +1629,33 @@ bot.command("reset_email", async (ctx) => {
 });
 
 // CALLBACK HANDLERS FOR ADMIN MENU
+
+bot.callbackQuery("adm_refresh_code", async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    
+    // 1. Alert that request is starting
+    await ctx.answerCallbackQuery("Sistem pembersihan masif diaktifkan...");
+    
+    // 2. Trigger GHA with event "manual_sync"
+    const trigger = await triggerGithubAction("manual_sync");
+    
+    if (trigger.success) {
+        await ctx.reply(
+            `✅ <b>Refresh Code Dijalankan!</b>\n\n` +
+            `Sinyal berhasil dikirim ke GitHub Actions.\n` +
+            `Mesin pengambil kode sedang bekerja di latar belakang.\n\n` +
+            `<i>Kode akan terupdate di database dalam 1-2 menit.</i>`,
+            { parse_mode: "HTML" }
+        );
+    } else {
+        await ctx.reply(
+            `❌ <b>Gagal Menjalankan Refresh Code</b>\n\n` +
+            `Error: <code>${trigger.message}</code>\n\n` +
+            `Silakan periksa Token GitHub Anda.`,
+            { parse_mode: "HTML" }
+        );
+    }
+});
 
 bot.callbackQuery("check_slot_btn", async (ctx) => {
     if (!isAdmin(ctx.from?.id || 0)) return;
@@ -2040,40 +2142,6 @@ bot.callbackQuery("adm_export_txt", async (ctx) => {
     await ctx.answerCallbackQuery();
 });
 
-// Command: Data Export (.txt)
-bot.command("data", async (ctx) => {
-    if (!isAdmin(ctx.from?.id || 0)) return;
-
-    try {
-        await ctx.reply("⏳ <b>Generating User Data...</b>", { parse_mode: "HTML" });
-        // Join with subscriptions to get expiration date for active subs
-        const res = await sql(`
-            SELECT u.id, u.first_name, u.username, u.email, u.joined_at, s.end_date 
-            FROM users u 
-            LEFT JOIN subscriptions s ON u.id = s.user_id AND s.status = 'active'
-            ORDER BY u.joined_at DESC
-        `);
-
-        let content = "ID | Name | Username | Email | Joined Date (UTC) | Exp Date (Active)\n";
-        content += "--------------------------------------------------------------------------------\n";
-
-        res.rows.forEach((u: any) => {
-            const expDate = u.end_date ? u.end_date : '-';
-            content += `${u.id} | ${u.first_name} | ${u.username || '-'} | ${u.email || '-'} | ${u.joined_at} | ${expDate}\n`;
-        });
-
-        const buffer = Buffer.from(content, 'utf-8');
-        const fileName = `users-data-${new Date().toISOString().split('T')[0]}.txt`;
-
-        await ctx.replyWithDocument(new InputFile(buffer, fileName), {
-            caption: `📂 <b>User Data Export</b>\nTotal: ${res.rows.length} users.`,
-            parse_mode: "HTML"
-        });
-
-    } catch (e: any) {
-        await ctx.reply(`❌ Export Failed: ${e.message}`);
-    }
-});
 
 
 // ============================================================
@@ -2691,24 +2759,7 @@ bot.on("message:text", async (ctx, next) => {
 // ============================================================
 
 
-// 1. Backup Database (Manual)
-bot.command("backupdb", async (ctx) => {
-    if (!isAdmin(ctx.from?.id || 0)) return;
 
-    try {
-        await ctx.reply("⏳ <b>Generating Backup...</b>", { parse_mode: "HTML" });
-        const json = await BackupService.generate();
-        const buffer = Buffer.from(json, 'utf-8');
-        const fileName = `backup-db-${TimeUtils.now().toISOString().replace(/[:.]/g, '-').substring(0, 19)}.json`;
-
-        await ctx.replyWithDocument(new InputFile(buffer, fileName), {
-            caption: `💾 <b>Database Backup</b>\n📅 ${TimeUtils.format()}`,
-            parse_mode: "HTML"
-        });
-    } catch (e: any) {
-        await ctx.reply(`❌ Backup Failed: ${e.message}`);
-    }
-});
 
 // 2. Force Expire User (Simulasi Expired)
 bot.command("forceexpire", async (ctx) => {
@@ -2857,7 +2908,7 @@ bot.command("data", async (ctx) => {
             let expDate = "-                     "; // 22 spaces
             if (row.end_date) {
                 const dbDate = row.end_date as string;
-                const utcDate = new Date(dbDate.includes('T') ? dbDate : dbDate.replace(' ', 'T') + 'Z');
+                const utcDate = new Date(dbDate.includes('T') ? dbDate : dbDate.replace(' ', 'T') + '+07:00');
                 expDate = TimeUtils.format(utcDate).replace(' WIB', '').padEnd(22);
             }
 
@@ -2867,7 +2918,7 @@ bot.command("data", async (ctx) => {
             let joinDate = "-                     ";
             if (row.joined_at) {
                 const dbJoin = row.joined_at as string;
-                const utcJoin = new Date(dbJoin.includes('T') ? dbJoin : dbJoin.replace(' ', 'T') + 'Z');
+                const utcJoin = new Date(dbJoin.includes('T') ? dbJoin : dbJoin.replace(' ', 'T') + '+07:00');
                 joinDate = TimeUtils.format(utcJoin).replace(' WIB', '').padEnd(22);
             }
 
