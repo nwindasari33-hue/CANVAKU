@@ -55,7 +55,23 @@ async function sendTelegram(message: string) {
             parse_mode: 'HTML'
         });
     } catch (e: any) {
-        console.error("Telegram Error:", e.response?.data || e.message);
+        const errMsg = e.response?.data || e.message;
+        console.error(`Telegram Error (Kirim ke ${target}):`, errMsg);
+        
+        // SMART FALLBACK: If sending to LOG_CHANNEL failed, try sending to ADMIN_ID directly
+        if (target === LOG_CHANNEL_ID && ADMIN_ID && LOG_CHANNEL_ID !== ADMIN_ID) {
+            console.log(`Mencoba kirim ulang laporan ke ADMIN_ID (${ADMIN_ID})...`);
+            try {
+                await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+                    chat_id: ADMIN_ID,
+                    text: finalMessage,
+                    parse_mode: 'HTML'
+                });
+                console.log("✅ Berhasil kirim ke ADMIN_ID.");
+            } catch (e2: any) {
+                console.error("Telegram Error (Kirim ke Admin):", e2.response?.data || e2.message);
+            }
+        }
     }
 }
 
