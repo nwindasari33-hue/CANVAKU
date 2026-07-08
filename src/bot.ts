@@ -1000,10 +1000,6 @@ async function handleActivation(ctx: any, emailInput: string) {
                         `<i>Poin Anda telah dipotong ${requiredPoints} poin. Tidak perlu invite ulang.</i>`,
                         { parse_mode: "HTML" }
                     );
-                    
-                    // RESET STATE ORDER MODE
-                    await sql("UPDATE users SET selected_product_id = NULL WHERE id = ?", [userId]);
-                    return msgPromise;
                 } else {
                     // GAGAL 5x -> REFUND POIN
                     if (pointsDeducted) {
