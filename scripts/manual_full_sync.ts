@@ -41,14 +41,21 @@ function getChromePath() {
 async function sendTelegram(message: string) {
     if (!BOT_TOKEN || (!ADMIN_ID && !LOG_CHANNEL_ID)) return;
     const target = LOG_CHANNEL_ID || ADMIN_ID;
+
+    // Truncate message if it exceeds Telegram's 4096 character limit
+    let finalMessage = message;
+    if (finalMessage.length > 4000) {
+        finalMessage = finalMessage.substring(0, 3950) + "\n\n... (Sebagian log dipotong karena melebihi batas pesan Telegram)";
+    }
+
     try {
         await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
             chat_id: target,
-            text: message,
+            text: finalMessage,
             parse_mode: 'HTML'
         });
-    } catch (e) {
-        console.error("Telegram Error:", e);
+    } catch (e: any) {
+        console.error("Telegram Error:", e.response?.data || e.message);
     }
 }
 
@@ -401,6 +408,8 @@ async function runManualSync() {
             `<b>[Total Slot Tersisa: ${totalSlotsLeft} Slot]</b>\n\n` +
             `✅ <i>Semua kode undangan terbaru telah di-refresh!</i>`;
 
+        // Print fully to console just in case
+        console.log("\n--- FULL REPORT LOG ---\n" + reportText + "\n-----------------------\n");
         await sendTelegram(reportText);
         console.log(`[${TimeUtils.format()}] 🧹 MANUAL FULL SYNC FINISHED.`);
 
@@ -408,8 +417,14 @@ async function runManualSync() {
         console.error("Critical Error:", e);
         await sendTelegram(`❌ <b>Manual Sync Error</b>\n${e.message}`);
     } finally {
-        await browser.close();
+        if (browser) await browser.close();
     }
 }
 
-runManualSync().catch(console.error);
+runManualSync().then(() => {
+    console.log("Exiting cleanly.");
+    process.exit(0);
+}).catch(e => {
+    console.error(e);
+    process.exit(1);
+});
