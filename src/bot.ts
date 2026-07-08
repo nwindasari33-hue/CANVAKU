@@ -1000,6 +1000,10 @@ async function handleActivation(ctx: any, emailInput: string) {
                         `<i>Poin Anda telah dipotong ${requiredPoints} poin. Tidak perlu invite ulang.</i>`,
                         { parse_mode: "HTML" }
                     );
+                    
+                    // RESET STATE ORDER MODE
+                    await sql("UPDATE users SET selected_product_id = NULL WHERE id = ?", [userId]);
+                    return msgPromise;
                 } else {
                     // GAGAL 5x -> REFUND POIN
                     if (pointsDeducted) {
@@ -1106,8 +1110,8 @@ async function handleActivation(ctx: any, emailInput: string) {
             { parse_mode: "HTML", reply_markup: keyboard }
         );
 
-        // 7. Save Message ID
-        await sql("UPDATE users SET last_message_id = ? WHERE id = ?", [sentMsg.message_id, userId]);
+        // 7. Save Message ID & CLEAR ORDER STATE
+        await sql("UPDATE users SET last_message_id = ?, selected_product_id = NULL WHERE id = ?", [sentMsg.message_id, userId]);
 
     } catch (error: any) {
         await ctx.reply(`❌ Error System: ${error.message}`);
@@ -1595,7 +1599,7 @@ bot.hears("👨‍💻 Admin Panel", showAdminPanel);
 bot.command("reset_email", async (ctx) => {
     if (!isAdmin(ctx.from?.id || 0)) return;
 
-    const input = ctx.match as string;
+    const input = (ctx.match as string || "").trim();
     if (!input) return ctx.reply("⚠️ Format: <code>/reset_email [email]</code>", { parse_mode: "HTML" });
 
     try {
